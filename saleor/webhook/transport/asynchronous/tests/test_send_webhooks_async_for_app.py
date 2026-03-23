@@ -37,14 +37,14 @@ def test_send_webhooks_async_for_app(
     mock_send_webhook_using_scheme_method.return_value = WebhookResponse(
         content="", status=EventDeliveryStatus.SUCCESS
     )
-    lock_id = app_webhook_mutex.lock_id
+    acquired_at = app_webhook_mutex.acquired_at
 
     # when
     send_webhooks_async_for_app(app_id=app.id, telemetry_context=MagicMock())
     app_webhook_mutex.refresh_from_db()
 
     # then
-    assert app_webhook_mutex.lock_id != lock_id
+    assert app_webhook_mutex.acquired_at != acquired_at
     mock_send_webhook_using_scheme_method.assert_called_once()
     mock_record_external_request.assert_called_once()
     mock_record_first_delivery_attempt_delay.assert_called_once()

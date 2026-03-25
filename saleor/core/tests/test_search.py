@@ -169,10 +169,28 @@ def test_parse_search_query_negation_before_or():
     )
 
 
-def test_parse_search_query_parentheses_are_stripped():
-    # Parentheses are not supported for grouping; they are stripped as special chars
+def test_parse_search_query_parenthesized_groups_with_or():
+    # Parentheses group terms so OR applies to entire groups
     assert parse_search_query("(green AND Tea) OR (coffee AND -black)") == (
-        "green:* & (Tea:* | coffee:*) & !black:*"
+        "(green:* & Tea:*) | (coffee:* & !black:*)"
+    )
+
+
+def test_parse_search_query_parenthesized_group_with_and():
+    assert parse_search_query("(coffee OR tea) -decaf") == (
+        "(coffee:* | tea:*) & !decaf:*"
+    )
+
+
+def test_parse_search_query_negated_group():
+    assert parse_search_query("coffee -(milk OR sugar)") == (
+        "coffee:* & !(milk:* | sugar:*)"
+    )
+
+
+def test_parse_search_query_nested_groups():
+    assert parse_search_query("((green OR black) tea) OR coffee") == (
+        "((green:* | black:*) & tea:*) | coffee:*"
     )
 
 

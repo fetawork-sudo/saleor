@@ -17,7 +17,8 @@ def _sanitize_word(word: str) -> str:
     so that e.g. "22:20" becomes "22 20" (two separate tokens) rather than "2220".
 
     Preserved: alphanumeric, underscore, hyphen, @, period
-    Replaced with space: parentheses, &, |, !, :, <, >, ', *
+    Replaced with space: &, |, !, :, <, >, ', *, parentheses (inside words only;
+    top-level parentheses are handled by ``_tokenize`` as grouping operators)
     """
     return re.sub(r"[()&|!:<>\'*]", " ", word).strip()
 
@@ -26,9 +27,10 @@ def _tokenize(value: str) -> list[dict]:
     """Tokenize a search string into structured tokens.
 
     Recognizes:
+    - Parenthesized groups: (coffee OR tea)
     - Quoted phrases: "green tea"
     - OR operator: coffee OR tea
-    - Negation: -decaf
+    - Negation: -decaf, -(group), -"phrase"
     - Regular words: coffee
     """
     tokens: list[dict] = []
@@ -40,11 +42,36 @@ def _tokenize(value: str) -> list[dict]:
             i += 1
             continue
 
+        # Skip stray closing parens
+        if value[i] == ")":
+            i += 1
+            continue
+
         # Check for negation prefix
         negated = False
         if value[i] == "-" and i + 1 < len(value) and not value[i + 1].isspace():
             negated = True
             i += 1
+
+        # Parenthesized group
+        if i < len(value) and value[i] == "(":
+            depth = 1
+            start = i + 1
+            j = start
+            while j < len(value) and depth > 0:
+                if value[j] == "(":
+                    depth += 1
+                elif value[j] == ")":
+                    depth -= 1
+                j += 1
+            inner = value[start : j - 1] if depth == 0 else value[start:]
+            i = j
+            inner_tokens = _tokenize(inner)
+            if inner_tokens:
+                tokens.append(
+                    {"type": "group", "tokens": inner_tokens, "negated": negated}
+                )
+            continue
 
         # Quoted phrase
         if i < len(value) and value[i] == '"':
@@ -63,9 +90,9 @@ def _tokenize(value: str) -> list[dict]:
                 tokens.append({"type": "phrase", "words": words, "negated": negated})
             continue
 
-        # Read the next word
+        # Read the next word (stop at whitespace or closing paren)
         end = i
-        while end < len(value) and not value[end].isspace():
+        while end < len(value) and not value[end].isspace() and value[end] != ")":
             end += 1
         raw_word = value[i:end]
         i = end
@@ -87,6 +114,7 @@ def _tokenize(value: str) -> list[dict]:
 
 
 def _format_token(token: dict) -> str:
+    """Format a single token as a raw tsquery fragment."""
     neg = "!" if token["negated"] else ""
     if token["type"] == "word":
         return f"{neg}{token['word']}:*"
@@ -96,36 +124,24 @@ def _format_token(token: dict) -> str:
             return f"{neg}{words[0]}"
         phrase_tsquery = " <-> ".join(words)
         return f"!({phrase_tsquery})" if neg else f"({phrase_tsquery})"
+    if token["type"] == "group":
+        inner = _build_tsquery(token["tokens"])
+        if not inner:
+            return ""
+        return f"!({inner})" if neg else f"({inner})"
     return ""
 
 
-def parse_search_query(value: str) -> str | None:
-    """Parse a search string into a raw PostgreSQL tsquery with prefix matching.
+def _build_tsquery(tokens: list[dict]) -> str:
+    """Convert a list of tokens into a raw tsquery string.
 
-    Supports websearch-compatible syntax:
-    - Multiple words (implicit AND): "coffee shop" -> coffee:* & shop:*
-    - OR operator: "coffee OR tea" -> coffee:* | tea:*
-    - Negation: "-decaf" -> !decaf:*
-    - Quoted phrases (exact match): '"green tea"' -> (green <-> tea)
-
-    Returns:
-        A raw tsquery string, or None if the input yields no searchable terms.
-
+    Handles OR-precedence by grouping OR-connected terms into segments and
+    parenthesizing them when AND segments are also present.  Recurses into
+    ``group`` tokens so that explicit parentheses in the input are honoured.
     """
-    value = value.strip()
-    if not value:
-        return None
-
-    tokens = _tokenize(value)
-    if not tokens:
-        return None
-
     # Group OR-connected terms into segments so we can parenthesize them.
     # OR connects only the immediately adjacent terms, so "A OR B C" means
     # (A | B) & C, not A | (B & C).
-    #
-    # Algorithm: walk tokens, track which terms are preceded by OR, then
-    # merge OR-connected terms into the same segment.
     terms: list[tuple[dict, bool]] = []  # (token, preceded_by_or)
     preceded_by_or = False
     for token in tokens:
@@ -148,14 +164,41 @@ def parse_search_query(value: str) -> str | None:
     multiple_segments = len(segments) > 1
     formatted_segments: list[str] = []
     for segment in segments:
-        parts = [_format_token(t) for t in segment]
+        parts = [p for t in segment if (p := _format_token(t))]
+        if not parts:
+            continue
         if len(parts) == 1:
             formatted_segments.append(parts[0])
         else:
             or_expr = " | ".join(parts)
             formatted_segments.append(f"({or_expr})" if multiple_segments else or_expr)
 
-    result = " & ".join(formatted_segments)
+    return " & ".join(formatted_segments)
+
+
+def parse_search_query(value: str) -> str | None:
+    """Parse a search string into a raw PostgreSQL tsquery with prefix matching.
+
+    Supports websearch-compatible syntax:
+    - Multiple words (implicit AND): "coffee shop" -> coffee:* & shop:*
+    - OR operator: "coffee OR tea" -> coffee:* | tea:*
+    - Negation: "-decaf" -> !decaf:*
+    - Quoted phrases (exact match): '"green tea"' -> (green <-> tea)
+    - Parenthesized groups: "(green AND tea) OR coffee" -> (green:* & tea:*) | coffee:*
+
+    Returns:
+        A raw tsquery string, or None if the input yields no searchable terms.
+
+    """
+    value = value.strip()
+    if not value:
+        return None
+
+    tokens = _tokenize(value)
+    if not tokens:
+        return None
+
+    result = _build_tsquery(tokens)
     return result if result else None
 
 

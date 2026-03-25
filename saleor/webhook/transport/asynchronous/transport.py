@@ -815,6 +815,7 @@ def trigger_send_webhooks_async_for_apps(
     app_ids = (
         EventDelivery.objects.using(settings.DATABASE_CONNECTION_REPLICA_NAME)
         .select_related("webhook__app_id")
+        .order_by()
         .filter(status=EventDeliveryStatus.PENDING)
         .values_list("webhook__app_id", flat=True)
         .distinct()

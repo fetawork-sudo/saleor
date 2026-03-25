@@ -86,6 +86,19 @@ def _tokenize(value: str) -> list[dict]:
     return tokens
 
 
+def _format_token(token: dict) -> str:
+    neg = "!" if token["negated"] else ""
+    if token["type"] == "word":
+        return f"{neg}{token['word']}:*"
+    if token["type"] == "phrase":
+        words = token["words"]
+        if len(words) == 1:
+            return f"{neg}{words[0]}"
+        phrase_tsquery = " <-> ".join(words)
+        return f"!({phrase_tsquery})" if neg else f"({phrase_tsquery})"
+    return ""
+
+
 def parse_search_query(value: str) -> str | None:
     """Parse a search string into a raw PostgreSQL tsquery with prefix matching.
 
@@ -107,37 +120,42 @@ def parse_search_query(value: str) -> str | None:
     if not tokens:
         return None
 
-    parts: list[str] = []
-    pending_connector = " & "
-
+    # Group OR-connected terms into segments so we can parenthesize them.
+    # OR connects only the immediately adjacent terms, so "A OR B C" means
+    # (A | B) & C, not A | (B & C).
+    #
+    # Algorithm: walk tokens, track which terms are preceded by OR, then
+    # merge OR-connected terms into the same segment.
+    terms: list[tuple[dict, bool]] = []  # (token, preceded_by_or)
+    preceded_by_or = False
     for token in tokens:
         if token["type"] == "or":
-            pending_connector = " | "
+            preceded_by_or = True
             continue
+        terms.append((token, preceded_by_or))
+        preceded_by_or = False
 
-        # Insert connector between terms
-        if parts:
-            parts.append(pending_connector)
-        pending_connector = " & "
+    # Build segments: consecutive OR-connected terms share a segment
+    segments: list[list[dict]] = []
+    for token, is_or_connected in terms:
+        if is_or_connected and segments:
+            segments[-1].append(token)
+        else:
+            segments.append([token])
 
-        neg = "!" if token["negated"] else ""
+    # Format each segment; parenthesize multi-term OR segments only when
+    # there are also AND-connected segments (to avoid unnecessary parens)
+    multiple_segments = len(segments) > 1
+    formatted_segments: list[str] = []
+    for segment in segments:
+        parts = [_format_token(t) for t in segment]
+        if len(parts) == 1:
+            formatted_segments.append(parts[0])
+        else:
+            or_expr = " | ".join(parts)
+            formatted_segments.append(f"({or_expr})" if multiple_segments else or_expr)
 
-        if token["type"] == "word":
-            parts.append(f"{neg}{token['word']}:*")
-
-        elif token["type"] == "phrase":
-            words = token["words"]
-            if len(words) == 1:
-                parts.append(f"{neg}{words[0]}")
-            else:
-                # Use <-> (followed-by) for phrase matching
-                phrase_tsquery = " <-> ".join(words)
-                if neg:
-                    parts.append(f"!({phrase_tsquery})")
-                else:
-                    parts.append(f"({phrase_tsquery})")
-
-    result = "".join(parts)
+    result = " & ".join(formatted_segments)
     return result if result else None
 
 

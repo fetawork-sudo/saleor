@@ -83,7 +83,7 @@ def test_parse_search_query_negated_quoted_phrase():
 
 
 def test_parse_search_query_or_with_negation():
-    assert parse_search_query("coffee OR tea -decaf") == "coffee:* | tea:* & !decaf:*"
+    assert parse_search_query("coffee OR tea -decaf") == "(coffee:* | tea:*) & !decaf:*"
 
 
 def test_parse_search_query_with_email():
@@ -124,7 +124,7 @@ def test_parse_search_query_or_between_phrases():
 
 def test_parse_search_query_negated_word_with_or():
     assert parse_search_query("coffee OR tea -decaf -sugar") == (
-        "coffee:* | tea:* & !decaf:* & !sugar:*"
+        "(coffee:* | tea:*) & !decaf:* & !sugar:*"
     )
 
 
@@ -163,14 +163,30 @@ def test_parse_search_query_or_chain_with_phrase_in_middle():
 
 
 def test_parse_search_query_negation_before_or():
-    # Negation applies to decaf, then OR connects to tea
-    assert parse_search_query("coffee -decaf OR tea") == ("coffee:* & !decaf:* | tea:*")
+    # Negation applies to decaf; OR connects -decaf and tea
+    assert parse_search_query("coffee -decaf OR tea") == (
+        "coffee:* & (!decaf:* | tea:*)"
+    )
 
 
 def test_parse_search_query_parentheses_are_stripped():
     # Parentheses are not supported for grouping; they are stripped as special chars
     assert parse_search_query("(green AND Tea) OR (coffee AND -black)") == (
-        "green:* & Tea:* | coffee:* & !black:*"
+        "green:* & (Tea:* | coffee:*) & !black:*"
+    )
+
+
+def test_parse_search_query_or_with_and_negation():
+    # "juice OR hood -carrot" means (juice | hood) AND NOT carrot
+    assert parse_search_query("juice OR hood -carrot") == (
+        "(juice:* | hood:*) & !carrot:*"
+    )
+
+
+def test_parse_search_query_or_with_explicit_and_negation():
+    # Explicit AND after OR group should also parenthesize correctly
+    assert parse_search_query("juice OR hood AND -carrot") == (
+        "(juice:* | hood:*) & !carrot:*"
     )
 
 

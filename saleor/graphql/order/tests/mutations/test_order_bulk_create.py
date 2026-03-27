@@ -10,7 +10,6 @@ from django.utils import timezone
 from .....account.models import Address
 from .....core import JobStatus
 from .....core.prices import quantize_price
-from .....payment.model_helpers import get_undiscounted_subtotal
 from .....discount.models import OrderDiscount
 from .....discount.utils.manual_discount import DiscountValueType
 from .....invoice.models import Invoice
@@ -31,6 +30,7 @@ from .....order.models import (
     OrderLine,
 )
 from .....payment import TransactionEventType
+from .....payment.model_helpers import get_undiscounted_subtotal
 from .....payment.models import TransactionEvent, TransactionItem
 from .....warehouse.models import Stock
 from ....core.enums import ErrorPolicyEnum

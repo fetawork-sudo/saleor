@@ -614,6 +614,12 @@ def create_attempts_for_deliveries(
     return attempt_for_deliveries
 
 
+def is_delivery_still_pending(delivery_id: int) -> bool:
+    return EventDelivery.objects.filter(
+        id=delivery_id, status=EventDeliveryStatus.PENDING
+    ).exists()
+
+
 @allow_writer()
 def delivery_update(delivery: "EventDelivery", status: str):
     delivery.status = status

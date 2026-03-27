@@ -55,6 +55,7 @@ from ..utils import (
     get_multiple_deliveries_for_webhooks,
     get_sqs_message_group_id,
     handle_webhook_retry,
+    is_delivery_still_pending,
     prepare_deferred_payload_data,
     process_failed_deliveries,
     send_webhook_using_scheme_method,
@@ -873,14 +874,19 @@ def process_async_webhooks_for_app(
 
         try:
             if not delivery.payload:
+                if is_delivery_still_pending(delivery_id):
+                    task_logger.info(
+                        "[Webhook ID:%r] Event delivery id: %r has no payload.",
+                        webhook.id,
+                        delivery.id,
+                    )
+                    break  # Stop processing deliveries, wait for next task iteration
                 task_logger.warning(
-                    "[Webhook ID:%r] Event delivery id: %r has no payload.",
+                    "[Webhook ID:%r] Event delivery id: %r has no payload and is no longer pending.",
                     webhook.id,
                     delivery.id,
                 )
-                # Stop processing deliveries if payload is missing
-                # Wait for the next task execution to check if the payload will be available
-                break
+                continue  # Skip processing this delivery if it's no longer pending
 
             data = delivery.payload.get_payload()
             # Convert payload to bytes if it's not already.

@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from queue import Queue
 from time import time
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import unquote, urlparse, urlunparse
@@ -407,17 +408,6 @@ def get_delivery_for_webhook(
     return delivery, not_found
 
 
-def get_pending_deliveries_for_app(app_id, batch_size):
-    return (
-        EventDelivery.objects.select_related("payload", "webhook__app")
-        .filter(webhook__app_id=app_id, status=EventDeliveryStatus.PENDING)
-        .order_by("created_at")
-        .annotate(
-            attempts_count=Count("attempts", distinct=True),
-        )[:batch_size]
-    )
-
-
 @dataclass
 class EventDeliveryRequest:
     attempt: EventDeliveryAttempt
@@ -427,12 +417,12 @@ class EventDeliveryRequest:
     prev_attempts_count: int
 
 
-def get_delivery_requests_for_app(
+def get_pending_delivery_requests_queue(
     app_id: int,
     batch_size: int,
     task_id: str | None = None,
-) -> list[EventDeliveryRequest]:
-    delivery_requests = []
+) -> Queue[EventDeliveryRequest]:
+    delivery_requests: Queue[EventDeliveryRequest] = Queue()
     deliveries_qs = (
         EventDelivery.objects.select_related("payload", "webhook__app")
         .filter(webhook__app_id=app_id, status=EventDeliveryStatus.PENDING)
@@ -461,7 +451,7 @@ def get_delivery_requests_for_app(
         data = delivery.payload.get_payload()
         data = data if isinstance(data, bytes) else data.encode("utf-8")
 
-        delivery_requests.append(
+        delivery_requests._put(
             EventDeliveryRequest(
                 attempt=create_attempt(delivery, task_id=task_id, with_save=False),
                 delivery=delivery,

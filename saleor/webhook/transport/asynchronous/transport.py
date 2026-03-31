@@ -51,8 +51,8 @@ from ..utils import (
     create_attempt,
     delivery_update,
     get_delivery_for_webhook,
-    get_delivery_requests_for_app,
     get_multiple_deliveries_for_webhooks,
+    get_pending_delivery_requests_queue,
     get_sqs_message_group_id,
     handle_webhook_retry,
     prepare_deferred_payload_data,
@@ -60,6 +60,8 @@ from ..utils import (
 )
 
 if TYPE_CHECKING:
+    from queue import Queue
+
     from ....graphql.core.context import SaleorContext
     from ....graphql.core.dataloaders import DataLoader
     from ....webhook.models import Webhook
@@ -847,18 +849,18 @@ def send_webhooks_async_for_app(
             return
 
         domain = get_domain()
-        delivery_requests = get_delivery_requests_for_app(
+        queue = get_pending_delivery_requests_queue(
             app_id, batch_size=WEBHOOK_ASYNC_BATCH_SIZE, task_id=self.request.id
         )
+        results: list[EventDeliveryRequest] = []
 
-        if not delivery_requests:
+        if queue.empty():
             logger.info("No pending deliveries found for App ID: %s", app_id)
             return
 
-        for request in delivery_requests:
-            execute_webhook_request(domain, request, telemetry_context)
+        execute_webhook_requests(domain, queue, results, telemetry_context)
 
-        process_executed_delivery_requests(delivery_requests)
+        process_executed_delivery_requests(results)
 
 
 @allow_writer()
@@ -893,82 +895,91 @@ def process_executed_delivery_requests(
         clear_successful_deliveries(successful_deliveries)
 
 
-def execute_webhook_request(
+def execute_webhook_requests(
     domain: str,
-    request: EventDeliveryRequest,
+    queue: "Queue[EventDeliveryRequest]",
+    results: list[EventDeliveryRequest],
     telemetry_context: TelemetryTaskContext,
 ):
-    attempt = request.attempt
-    delivery = request.delivery
-    webhook = delivery.webhook
+    while not queue.empty():
+        request = queue.get()
 
-    if request.prev_attempts_count == 0:
-        record_first_delivery_attempt_delay(
-            delivery.created_at,
-            delivery.event_type,
-            webhook.app,
-        )
+        attempt = request.attempt
+        delivery = request.delivery
+        webhook = delivery.webhook
 
-    try:
-        with webhooks_otel_trace(
-            delivery.event_type,
-            request.payload_size,
-            webhook.app,
-            span_links=telemetry_context.links,
-        ):
-            response = send_webhook_using_scheme_method(
-                webhook.target_url,
-                domain,
-                webhook.secret_key,
+        if request.prev_attempts_count == 0:
+            record_first_delivery_attempt_delay(
+                delivery.created_at,
                 delivery.event_type,
-                request.payload,
-                webhook.custom_headers,
+                webhook.app,
             )
 
-        record_external_request(
-            delivery.event_type,
-            webhook.target_url,
-            response,
-            request.payload_size,
-            webhook.app,
-            sync=False,
-        )
-    except ValueError as e:
-        response = WebhookResponse(content=str(e), status=EventDeliveryStatus.FAILED)
+        try:
+            with webhooks_otel_trace(
+                delivery.event_type,
+                request.payload_size,
+                webhook.app,
+                span_links=telemetry_context.links,
+            ):
+                response = send_webhook_using_scheme_method(
+                    webhook.target_url,
+                    domain,
+                    webhook.secret_key,
+                    delivery.event_type,
+                    request.payload,
+                    webhook.custom_headers,
+                )
 
-    if response.status == EventDeliveryStatus.SUCCESS:
-        delivery.status = EventDeliveryStatus.SUCCESS
-        task_logger.info(
-            "[Webhook ID:%r] Payload sent to %r for event %r. Delivery id: %r",
-            webhook.id,
-            sanitize_url_for_logging(webhook.target_url),
-            delivery.event_type,
-            delivery.id,
-        )
+            record_external_request(
+                delivery.event_type,
+                webhook.target_url,
+                response,
+                request.payload_size,
+                webhook.app,
+                sync=False,
+            )
+        except ValueError as e:
+            response = WebhookResponse(
+                content=str(e), status=EventDeliveryStatus.FAILED
+            )
 
-    elif response.status == EventDeliveryStatus.FAILED:
-        log_extra_details = {
-            "webhook": {
-                "id": webhook.id,
-                "target_url": sanitize_url_for_logging(webhook.target_url),
-                "event": delivery.event_type,
-                "execution_mode": "async",
-                "duration": response.duration,
-                "http_status_code": response.response_status_code,
-            },
-        }
-        task_logger.info(
-            "[Webhook ID:%r] Failed request to %r: %r for event: %r. Delivery id: %r",
-            webhook.id,
-            sanitize_url_for_logging(webhook.target_url),
-            response.content,
-            delivery.event_type,
-            delivery.id,
-            extra=log_extra_details,
-        )
+        attempt_update(attempt, response, with_save=False)
+        observability.report_event_delivery_attempt(attempt)
+        results.append(request)
 
-    attempt_update(attempt, response, with_save=False)
-    observability.report_event_delivery_attempt(attempt)
+        if response.status == EventDeliveryStatus.SUCCESS:
+            task_logger.info(
+                "[Webhook ID:%r] Payload sent to %r for event %r. Delivery id: %r",
+                webhook.id,
+                sanitize_url_for_logging(webhook.target_url),
+                delivery.event_type,
+                delivery.id,
+            )
+            delivery.status = EventDeliveryStatus.SUCCESS
+
+        elif response.status == EventDeliveryStatus.FAILED:
+            log_extra_details = {
+                "webhook": {
+                    "id": webhook.id,
+                    "target_url": sanitize_url_for_logging(webhook.target_url),
+                    "event": delivery.event_type,
+                    "execution_mode": "async",
+                    "duration": response.duration,
+                    "http_status_code": response.response_status_code,
+                },
+            }
+            task_logger.info(
+                "[Webhook ID:%r] Failed request to %r: %r for event: %r. Delivery id: %r",
+                webhook.id,
+                sanitize_url_for_logging(webhook.target_url),
+                response.content,
+                delivery.event_type,
+                delivery.id,
+                extra=log_extra_details,
+            )
+            # TODO: continue if max_concurrency > 1
+            break
 
 
 def send_observability_events(webhooks: list[WebhookData], events: list[bytes]):

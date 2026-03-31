@@ -224,6 +224,7 @@ def test_send_multiple_webhooks_async_for_app_retry_on_failure(
 
     # failed attempt should be recorded
     attempts = EventDeliveryAttempt.objects.all()
+    print([(a.id, a.status, a.delivery.id) for a in attempts])
     assert len(attempts) == 1
     assert attempts[0].status == EventDeliveryStatus.FAILED
     assert attempts[0].delivery.id == deliveries[1].id

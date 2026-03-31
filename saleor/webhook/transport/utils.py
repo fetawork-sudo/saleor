@@ -418,6 +418,71 @@ def get_pending_deliveries_for_app(app_id, batch_size):
     )
 
 
+@dataclass
+class EventDeliveryRequestAttempt:
+    attempt: EventDeliveryAttempt
+    payload: bytes
+    payload_size: int
+    prev_attempts_count: int
+
+    @property
+    def delivery(self):
+        return self.attempt.delivery
+
+    @property
+    def webhook(self):
+        return self.delivery.webhook
+
+    @property
+    def app(self):
+        return self.webhook.app
+
+
+def get_delivery_request_attempts_for_app(
+    app_id: int,
+    batch_size: int,
+    task_id: str | None = None,
+) -> list[EventDeliveryRequestAttempt]:
+    request_attempts = []
+    deliveries_qs = (
+        EventDelivery.objects.select_related("payload", "webhook__app")
+        .filter(webhook__app_id=app_id, status=EventDeliveryStatus.PENDING)
+        .order_by("created_at")
+        .annotate(
+            attempts_count=Count("attempts", distinct=True),
+        )[:batch_size]
+    )
+
+    for delivery in deliveries_qs:
+        if not delivery.payload:
+            if is_delivery_still_pending(delivery.id):
+                task_logger.info(
+                    "[Webhook ID:%r] Event delivery id: %r has no payload.",
+                    delivery.webhook.id,
+                    delivery.id,
+                )
+                break  # Stop processing deliveries, wait for next task iteration
+            task_logger.warning(
+                "[Webhook ID:%r] Event delivery id: %r has no payload and is no longer pending.",
+                delivery.webhook.id,
+                delivery.id,
+            )
+            continue  # Skip processing this delivery if it's no longer pending
+
+        data = delivery.payload.get_payload()
+        data = data if isinstance(data, bytes) else data.encode("utf-8")
+
+        request_attempts.append(
+            EventDeliveryRequestAttempt(
+                attempt=create_attempt(delivery, task_id=task_id, with_save=False),
+                payload=data,
+                payload_size=len(data),
+                prev_attempts_count=delivery.attempts_count,
+            )
+        )
+    return request_attempts
+
+
 def get_multiple_deliveries_for_webhooks(
     event_delivery_ids,
     database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,

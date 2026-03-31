@@ -9,9 +9,14 @@ RUN apt-get -y update \
 
 # Install Python dependencies
 WORKDIR /app
+
+# UV Tooling für schnelles Dependency-Management
 COPY --from=ghcr.io/astral-sh/uv:0.10.8@sha256:88234bc9e09c2b2f6d176a3daf411419eb0370d450a08129257410de9cfafd2a \
   /uv /uvx /bin/
+
 ENV UV_COMPILE_BYTECODE=1 UV_SYSTEM_PYTHON=1 UV_PROJECT_ENVIRONMENT=/usr/local
+
+# Fix für Railway: id=uv-cache hinzugefügt
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
@@ -22,7 +27,7 @@ FROM python:3.12-slim
 
 RUN groupadd -r saleor && useradd -r -g saleor saleor
 
-# Pillow dependencies
+# Pillow & System dependencies
 RUN apt-get update \
   && apt-get install -y \
   libffi8 \
@@ -36,7 +41,7 @@ RUN apt-get update \
   libmagic1 \
   # Required by celery[sqs] which uses pycurl for AWS SQS support
   libcurl4 \
-  # Required to allows to identify file types when handling file uploads
+  # Required to allow identifying file types when handling file uploads
   media-types \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
@@ -44,14 +49,23 @@ RUN apt-get update \
 RUN mkdir -p /app/media /app/static \
   && chown -R saleor:saleor /app/
 
+# Übernehme installierte Pakete aus dem Build-Container
 COPY --from=build-python /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
 COPY --from=build-python /usr/local/bin/ /usr/local/bin/
+
+# Kopiere Projektdateien
 COPY . /app
 WORKDIR /app
 
+# Statische Dateien sammeln
 ARG STATIC_URL
 ENV STATIC_URL=${STATIC_URL:-/static/}
 RUN SECRET_KEY=dummy STATIC_URL=${STATIC_URL} python3 manage.py collectstatic --no-input
+
+# Berechtigungen für den Saleor User setzen
+RUN chown -R saleor:saleor /app/
+
+USER saleor
 
 EXPOSE 8000
 ENV PYTHONUNBUFFERED=1

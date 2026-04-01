@@ -1,0 +1,68 @@
+services:
+  api:
+    image: saleor-api-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - /app/saleor/static/dp
+      - /app/media
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgres://saleor:saleor@db:5432/saleor
+      - CELERY_BROKER_URL=redis://valkey:6379/0
+      - CACHE_URL=redis://valkey:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+
+  worker:
+    image: saleor-worker-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A saleor worker --loglevel=info
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgres://saleor:saleor@db:5432/saleor
+      - CELERY_BROKER_URL=redis://valkey:6379/0
+      - CACHE_URL=redis://valkey:6379/1
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=saleor
+      - POSTGRES_PASSWORD=saleor
+      - POSTGRES_DB=saleor
+    volumes:
+      - saleor-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saleor"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: valkey/valkey:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - saleor-valkey:/data
+
+volumes:
+  saleor-db:
+  saleor-valkey:
